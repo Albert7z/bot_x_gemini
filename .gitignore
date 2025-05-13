@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*pip-wheel-metadata/
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+include/
+lib/
+lib64/
+Scripts/
+pyvenv.cfg
+pip-selfcheck.json
+
+# Arquivos de log (opcional, dependendo se você quer versioná-los)
+# *.log 
+
+# Screenshots de debug (geralmente não se versiona)
+screenshots_debug/
+screenshots_twitter_bot/
+
+# Arquivos de configuração local com segredos (NUNCA SUBIR API KEYS!)
+# Se você criar um .env ou config_secret.ini, adicione aqui
+.env
+config.ini 
+*.pem # Chaves privadas
+
+# Arquivos de IDE/Editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
