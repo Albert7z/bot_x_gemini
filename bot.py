@@ -6,7 +6,7 @@ import requests
 import os
 
 from dotenv import load_dotenv
-load_dotenv()  # Carrega variáveis de ambiente do arquivo .env, se existir
+load_dotenv() # Carrega variáveis de ambiente do arquivo .env, se existir
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -16,331 +16,394 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
-from selenium.webdriver.common.keys import Keys
+# from selenium.webdriver.common.keys import Keys # Keys não está sendo usado, pode ser removido
 
 import schedule
 
 # --- CONFIGURAÇÕES GLOBAIS ---
-# Chave da API Gemini (Mantenha segura! Idealmente, use variáveis de ambiente)
-# Substitua pelo seu PROJECT_ID se estiver usando a API do Vertex AI
-# ou deixe apenas a API_KEY se estiver usando a API do Google AI Studio diretamente
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # <--- SUBSTITUA PELA SUA CHAVE REAL
-# Escolha o modelo Gemini apropriado (ex: gemini-pro, gemini-1.0-pro, gemini-1.5-flash-latest etc.)
-GEMINI_MODEL_ID = "gemini-1.5-flash-latest" # Ou o modelo que você tem acesso
+# Estas são as configurações principais que o bot utiliza.
+# Recomenda-se usar variáveis de ambiente (via arquivo .env) para informações sensíveis.
 
-# Define o endpoint baseado se é Google AI Studio (genai.googleapis.com) ou Vertex AI (REGION-aiplatform.googleapis.com)
-# Para Google AI Studio (geralmente usa apenas API Key):
+# Chave da API para o serviço Google Gemini. Deve ser configurada no arquivo .env.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Identificador do modelo Gemini a ser utilizado para geração de texto.
+GEMINI_MODEL_ID = "gemini-1.5-flash-latest" 
+
+# URL base para a API do Google Gemini (usando Google AI Studio).
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL_ID}:generateContent?key={GEMINI_API_KEY}"
-# Para Vertex AI (geralmente usa autenticação gcloud/ADC e Project ID):
-# GEMINI_API_REGION = "us-central1" # Exemplo de região
-# GEMINI_API_URL_VERTEX = f"https://{GEMINI_API_REGION}-aiplatform.googleapis.com/v1/projects/{GEMINI_PROJECT_ID}/locations/{GEMINI_API_REGION}/publishers/google/models/{GEMINI_MODEL_ID}:streamGenerateContent"
-# Se for usar Vertex AI, a autenticação é diferente (geralmente gcloud auth application-default login) e não passaria a API Key no header assim.
-# Por simplicidade, vamos focar na API do Google AI Studio primeiro.
+# Para Vertex AI, a URL e autenticação seriam diferentes e geralmente não envolvem passar a API key diretamente na URL.
 
-# Configurações do Selenium
-PROFILE_PATH = os.getenv("CHROME_PROFILE_PATH")  # Caminho do perfil do Chrome (se necessário)
-TWITTER_BASE_URL = "https://x.com"
-TWITTER_TRENDS_URL = f"{TWITTER_BASE_URL}/explore/tabs/trending"
-TWITTER_HOME_URL_FOR_TWEET_BUTTON = f"{TWITTER_BASE_URL}/home"
+# Configurações relacionadas ao Selenium e ao X (Twitter)
+PROFILE_PATH = os.getenv("CHROME_PROFILE_PATH")  # Caminho para um perfil do Chrome existente (opcional, para manter login).
+TWITTER_BASE_URL = "https://x.com"  # URL base da plataforma X.
+TWITTER_TRENDS_URL = f"{TWITTER_BASE_URL}/explore/tabs/trending"  # URL da página de trending topics.
+TWITTER_HOME_URL_FOR_TWEET_BUTTON = f"{TWITTER_BASE_URL}/home" # URL da home, usada para acesso mais estável ao botão de postar.
 
-# Outras Configurações
-MAX_TWEET_CHARACTERS = 280
-SCHEDULE_INTERVAL_MINUTES = 90 # Alterado para 15 para não sobrecarregar
-SCREENSHOT_DIR = "screenshots_twitter_bot"
+# Outras Configurações do Bot
+MAX_TWEET_CHARACTERS = 260  # Limite de caracteres para o tweet gerado (considerando uma margem).
+SCHEDULE_INTERVAL_MINUTES = 90  # Intervalo em minutos para a execução automática da tarefa de postagem.
+SCREENSHOT_DIR = "BOT_X/screenshots_twitter_bot" # Diretório para salvar screenshots em caso de erro.
 
-# Configuração do Logging
+# Configuração do sistema de Logging para registrar eventos e erros.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Cria o diretório de screenshots se ele não existir.
 if not os.path.exists(SCREENSHOT_DIR):
     os.makedirs(SCREENSHOT_DIR)
 
-def init_driver(profile_path):
-    logging.info("Configurando opções do Chrome...")
-    options = Options()
-    if profile_path:
-        logging.info(f"Usando perfil do Chrome em: {profile_path}")
-        options.add_argument(f"user-data-dir={profile_path}")
-    else:
-        logging.warning("Nenhum caminho de perfil do Chrome especificado.")
-    options.add_argument("--lang=pt-BR")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    # options.add_argument("--headless")
+# Verificações iniciais de configuração crucial.
+if not GEMINI_API_KEY:
+    logging.critical("CRÍTICO: GEMINI_API_KEY não encontrada no arquivo .env! O bot não pode funcionar.")
+    exit("Saindo: GEMINI_API_KEY não configurada.") # Encerra o script se a chave não estiver presente.
+if not PROFILE_PATH:
+    # Aviso se o perfil do Chrome não for especificado; o bot usará um perfil temporário.
+    logging.warning("CHROME_PROFILE_PATH não encontrado no .env. O WebDriver usará um perfil temporário/padrão.")
 
-    logging.info("Instalando/Obtendo ChromeDriver...")
+
+def init_driver(profile_path_arg):
+    """
+    Inicializa e retorna uma instância do WebDriver do Chrome.
+
+    Configura as opções do Chrome, incluindo o uso de um perfil de usuário (se fornecido),
+    idioma, maximização da janela e outras otimizações para automação.
+
+    Args:
+        profile_path_arg (str): O caminho para o diretório de perfil do usuário do Chrome.
+                                Pode ser None para usar um perfil temporário/padrão.
+    Returns:
+        webdriver.Chrome: A instância do driver do Chrome configurada.
+    Raises:
+        Exception: Se houver um erro durante a inicialização do WebDriver.
+    """
+    logging.info("Configurando opções do WebDriver do Chrome...")
+    options = Options()
+    if profile_path_arg: # Usa o perfil do Chrome se um caminho for fornecido.
+        logging.info(f"Utilizando perfil do Chrome localizado em: {profile_path_arg}")
+        options.add_argument(f"user-data-dir={profile_path_arg}")
+    else:
+        logging.info("Nenhum perfil do Chrome especificado. Usando perfil padrão/temporário.")
+    
+    # Opções diversas para o comportamento do navegador.
+    options.add_argument("--lang=pt-BR") # Define o idioma do navegador.
+    options.add_argument("--start-maximized") # Inicia o navegador maximizado.
+    options.add_argument("--disable-notifications") # Desabilita notificações do Chrome.
+    options.add_argument("--disable-gpu") # Recomendado para ambientes headless ou para evitar problemas de renderização.
+    options.add_argument("--no-sandbox") # Necessário em alguns ambientes Linux/Docker.
+    options.add_argument("--disable-dev-shm-usage") # Resolve problemas de recursos em alguns ambientes Linux.
+    # options.add_argument("--headless") # Descomente para rodar sem interface gráfica (após testes).
+
+    logging.info("Instalando/Obtendo ChromeDriver via webdriver_manager...")
     try:
+        # Utiliza webdriver_manager para baixar e configurar o ChromeDriver automaticamente.
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
-        logging.info("WebDriver inicializado com sucesso.")
+        logging.info("WebDriver do Chrome inicializado com sucesso.")
         return driver
     except Exception as e:
-        logging.error(f"Erro ao inicializar o WebDriver: {e}", exc_info=True)
-        raise
-
-    # Verificação (opcional, mas bom para debug inicial)
-if not GEMINI_API_KEY:
-    logging.error("A variável de ambiente GEMINI_API_KEY não foi encontrada. Verifique seu arquivo .env")
-    # Você pode querer sair do script aqui ou lançar uma exceção
-    exit("Erro: GEMINI_API_KEY não configurada.")
-if not PROFILE_PATH:
-    logging.warning("A variável de ambiente CHROME_PROFILE_PATH não foi encontrada. Usando None (perfil temporário).")
-    # PROFILE_PATH = None # Ou defina um padrão se quiser
+        logging.error(f"Falha ao inicializar o WebDriver do Chrome: {e}", exc_info=True)
+        raise # Re-levanta a exceção para que a falha seja tratada no nível superior.
 
 def get_tweet_content_from_gemini(trend_topic):
-    # ... (cabeçalho da função e headers como antes) ...
+    """
+    Gera o conteúdo de um tweet sobre um tópico específico usando a API Gemini.
+
+    Args:
+        trend_topic (str): O tópico (trending topic) para o qual o tweet será gerado.
+
+    Returns:
+        str or None: O texto do tweet gerado, ou None se ocorrer um erro.
+    """
+    logging.info(f"Solicitando à API Gemini a geração de um tweet para o tópico: '{trend_topic}'")
+    headers = {"Content-Type": "application/json"} # Cabeçalho padrão para requisições JSON.
     
-    logging.info(f"Gerando conteúdo de tweet para o tópico via Gemini: '{trend_topic}'")
-    headers = {"Content-Type": "application/json"}
+    # Prompt detalhado para guiar a IA Gemini na criação do tweet.
     prompt = (
         f"O termo '{trend_topic}' está atualmente em alta no X (antigo Twitter). "
         f"Crie um tweet curto e engajador (máximo de {MAX_TWEET_CHARACTERS - 45} caracteres) "
         f"que compartilhe uma curiosidade interessante ou um fato pouco conhecido sobre '{trend_topic}', "
         f"considerando seu contexto como um assunto popular online. "
-        # Removida a parte explícita sobre "mencionar setor" e deixado mais aberto
         f"Se o tópico envolver uma inovação, destaque brevemente seu potencial impacto. "
-        f"Inclua 2 ou 3 hashtags relevantes e populares. "
+        f"Inclua 1 hashtag somente, que seja relevante. " # Pede uma única hashtag relevante.
         f"O tom deve ser informativo e curioso. "
-        f"Não use datas/anos específicos. Não use saudações. Não inclua links. Não use colchetes [] na resposta final."
-        f"Responda APENAS com o texto do tweet."
+        f"Não use datas ou anos específicos. Não use saudações. Não inclua links. Não use colchetes [] na resposta final."
+        f"Responda APENAS com o texto do tweet." # Garante que a resposta seja apenas o tweet.
     )
     
+    # Payload da requisição para a API Gemini.
     data_payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.50, # Um pouco menos aleatório
-            "maxOutputTokens": 150,
-            "topP": 0.95,
-            "topK": 40
+        "generationConfig": { # Configurações para controlar a geração de texto.
+            "temperature": 0.50, # Controla a "criatividade" (valores menores são mais determinísticos).
+            "maxOutputTokens": 150, # Limite máximo de tokens na resposta.
+            "topP": 0.95, # Parâmetro de amostragem (nucleus sampling).
+            "topK": 40    # Parâmetro de amostragem (top-k sampling).
         },
-        # Safety settings (opcional, mas recomendado)
+        # Configurações de segurança para filtrar conteúdo indesejado (comentadas, mas recomendadas).
         # "safetySettings": [
-        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        #     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}
+        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}, ...
         # ]
     }
 
     try:
-        logging.debug(f"Enviando requisição para Gemini API URL: {GEMINI_API_URL}")
-        logging.debug(f"Payload para Gemini: {json.dumps(data_payload, indent=2)}")
-        response = requests.post(GEMINI_API_URL, headers=headers, json=data_payload, timeout=45) # Aumentar timeout
+        logging.debug(f"Enviando requisição para API Gemini. URL: {GEMINI_API_URL}")
+        logging.debug(f"Payload da requisição Gemini: {json.dumps(data_payload, indent=2)}")
+        response = requests.post(GEMINI_API_URL, headers=headers, json=data_payload, timeout=45)
         
-        logging.debug(f"Status da resposta da API Gemini: {response.status_code}")
-        logging.debug(f"Corpo da resposta da API Gemini (bruto): {response.text[:500]}") # Logar início da resposta
+        logging.debug(f"API Gemini - Status da Resposta: {response.status_code}")
+        logging.debug(f"API Gemini - Corpo da Resposta (parcial): {response.text[:500]}")
 
-        response.raise_for_status() 
+        response.raise_for_status() # Levanta um erro HTTP para status ruins (4xx ou 5xx).
         
-        data = response.json()
+        data = response.json() # Converte a resposta JSON em um dicionário Python.
         
-        # A estrutura da resposta do Gemini é diferente
-        # Verifica se 'candidates' existe e tem pelo menos um item
+        # Extrai o texto do tweet da estrutura de resposta da API Gemini.
         if "candidates" in data and data["candidates"]:
             candidate = data["candidates"][0]
-            # Verifica se 'content' e 'parts' existem
             if "content" in candidate and "parts" in candidate["content"] and candidate["content"]["parts"]:
                 tweet_text = candidate["content"]["parts"][0]["text"].strip()
             else:
-                logging.error(f"Estrutura inesperada na resposta do Gemini (sem content/parts): {candidate}")
+                logging.error(f"API Gemini: Estrutura de resposta inesperada (sem 'content' ou 'parts'). Candidato: {candidate}")
                 return None
         else:
-            logging.error(f"Nenhum candidato retornado pela API Gemini ou estrutura inesperada. Resposta: {data}")
-            # Se houver um 'promptFeedback', pode indicar bloqueio por safety settings
-            if "promptFeedback" in data and "blockReason" in data["promptFeedback"]:
-                logging.error(f"Prompt bloqueado pela API Gemini. Razão: {data['promptFeedback']['blockReason']}")
+            logging.error(f"API Gemini: Nenhum candidato retornado ou estrutura de resposta inesperada. Resposta: {data}")
+            if "promptFeedback" in data and "blockReason" in data["promptFeedback"]: # Verifica se o prompt foi bloqueado.
+                logging.error(f"API Gemini: Prompt bloqueado. Razão: {data['promptFeedback']['blockReason']}")
             return None
             
+        # Trunca o tweet se exceder o limite máximo de caracteres.
         if len(tweet_text) > MAX_TWEET_CHARACTERS:
             tweet_text = tweet_text[:MAX_TWEET_CHARACTERS-3] + "..."
+            logging.warning(f"Tweet gerado foi truncado para {MAX_TWEET_CHARACTERS} caracteres.")
             
-        logging.info(f"Tweet gerado pelo Gemini: '{tweet_text}'")
+        logging.info(f"Tweet gerado pela API Gemini: '{tweet_text}'")
         return tweet_text
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Erro na requisição à API Gemini: {e}")
-    except (KeyError, IndexError, TypeError) as e: # TypeError para caso 'parts' não seja uma lista
-        logging.error(f"Erro ao processar resposta da API Gemini: {e} - Resposta: {data if 'data' in locals() else 'N/A'}")
-    except json.JSONDecodeError as e:
-        logging.error(f"Erro ao decodificar JSON da resposta da API Gemini: {e} - Resposta (texto): {response.text if 'response' in locals() else 'N/A'}")
-    return None
+    except requests.exceptions.RequestException as e: # Erros de rede ou HTTP.
+        logging.error(f"Erro de requisição ao contatar a API Gemini: {e}")
+    except (KeyError, IndexError, TypeError) as e: # Erros ao processar a estrutura do JSON.
+        logging.error(f"Erro ao processar a resposta da API Gemini: {e} - Resposta: {data if 'data' in locals() else 'N/A'}")
+    except json.JSONDecodeError as e: # Erro se a resposta não for um JSON válido.
+        logging.error(f"Erro ao decodificar JSON da API Gemini: {e} - Resposta (texto): {response.text if 'response' in locals() else 'N/A'}")
+    return None # Retorna None em caso de qualquer erro.
 
 
 def select_trends_from_twitter(driver):
-    logging.info(f"Acessando URL de trends: {TWITTER_TRENDS_URL}")
+    """
+    Navega até a página de trending topics do X e extrai uma lista de trends.
+
+    Args:
+        driver (webdriver.Chrome): A instância do WebDriver do Chrome.
+
+    Returns:
+        list: Uma lista de strings contendo os nomes das trends encontradas e filtradas.
+              Retorna uma lista vazia se ocorrer um erro ou nenhuma trend for encontrada.
+    """
+    logging.info(f"Acessando a página de trending topics: {TWITTER_TRENDS_URL}")
     driver.get(TWITTER_TRENDS_URL)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 20) # Define um tempo máximo de espera para os elementos.
 
     try:
+        # XPath para localizar o contêiner principal que agrupa os trending topics.
+        # Inclui variações de 'aria-label' para diferentes idiomas ou versões da UI.
         trends_container_xpath = (
             '//div[@aria-label="Timeline: Explore" or '
             '@aria-label="Linha do Tempo: Explorar" or '
             '@aria-label="Timeline: Trending now" or '
             '@aria-label="Timeline: Assuntos do momento"]'
         )
+        # Espera até que o contêiner de trends esteja visível na página.
         trends_container = wait.until(
             EC.visibility_of_element_located((By.XPATH, trends_container_xpath))
         )
-        logging.info("Contêiner de trends encontrado.")
+        logging.info("Contêiner de trending topics encontrado.")
 
-        # XPath para os nomes das trends (o segundo div dentro de data-testid="trend" costuma ter o nome)
-        # Procuramos pelo span dentro deste div.
+        # XPath para extrair o texto principal (nome) de cada item de trend.
+        # Este XPath tenta ser específico para o elemento que contém o nome da trend.
         trend_elements_xpath = './/div[@data-testid="trend"]/div/div[2]/span'
-        
-        # Se o anterior não funcionar, podemos tentar ser mais genéricos, pegando todos os spans
-        # e filtrando depois. No seu código original, era um XPath absoluto muito específico.
-        # Este é um pouco mais robusto:
+        # Alternativa (comentada): um XPath mais genérico que pode pegar mais ruído,
+        # mas pode ser útil se a estrutura da página mudar significativamente.
         # trend_elements_xpath_alternative = './/div[@data-testid="trend"]//span'
 
-        # Esperar que pelo menos alguns itens de trend estejam carregados
+        # Espera que pelo menos alguns elementos de trend individuais estejam presentes no DOM.
         wait.until(EC.presence_of_all_elements_located((By.XPATH, './/div[@data-testid="trend"]')))
         
+        # Encontra todos os elementos candidatos a serem nomes de trends.
         candidate_elements = trends_container.find_elements(By.XPATH, trend_elements_xpath)
         
         trends_texts = []
         for elem in candidate_elements:
-            text = elem.text.strip()
-            # Filtros básicos: não vazio, não é só um número, não é só "posts", não contém "·" (separador de categoria)
-            # e tem um tamanho razoável.
-            if text and not text.isdigit() and \
+            text = elem.text.strip() # Pega o texto do elemento e remove espaços extras.
+            # Aplica filtros para remover textos que provavelmente não são trends reais.
+            if text and \
+               not text.isdigit() and \
                "posts" not in text.lower() and \
                "tweets" not in text.lower() and \
                "·" not in text and \
-               len(text) > 2 and len(text) < 50: # Limite de tamanho para evitar frases longas
+               2 < len(text) < 50: # Filtra por tamanho para evitar textos muito curtos ou longos.
                 trends_texts.append(text)
         
-        unique_trends = list(dict.fromkeys(trends_texts)) # Remover duplicatas
+        # Remove trends duplicadas mantendo a ordem de aparição.
+        unique_trends = list(dict.fromkeys(trends_texts)) 
 
-        logging.info(f"Trends encontradas e pré-filtradas ({len(unique_trends)}): {unique_trends[:10]}")
+        logging.info(f"Trends encontradas e pré-filtradas ({len(unique_trends)}): {unique_trends[:10]}") # Loga as 10 primeiras.
         return unique_trends
 
     except TimeoutException:
-        logging.error("Timeout ao tentar encontrar trends.")
+        logging.error("Timeout ao tentar encontrar os trending topics. A página pode não ter carregado ou os seletores mudaram.")
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_selecting_trends_timeout.png"))
-    except Exception as e:
-        logging.error(f"Erro ao selecionar trends: {e}", exc_info=True)
+    except Exception as e: # Captura outras exceções durante a seleção de trends.
+        logging.error(f"Erro inesperado ao selecionar trends: {e}", exc_info=True)
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_selecting_trends_generic.png"))
-    return []
+    return [] # Retorna lista vazia em caso de erro.
 
 
 def post_tweet_on_twitter(driver, tweet_content):
-    logging.info("Navegando para a home para encontrar o botão de postar.")
-    driver.get(TWITTER_HOME_URL_FOR_TWEET_BUTTON)
-    wait = WebDriverWait(driver, 30) # Aumentar espera para home page
+    """
+    Posta um tweet na plataforma X usando a instância do WebDriver.
+
+    Args:
+        driver (webdriver.Chrome): A instância do WebDriver.
+        tweet_content (str): O texto do tweet a ser postado.
+
+    Returns:
+        bool: True se o tweet foi postado com sucesso, False caso contrário.
+    """
+    logging.info("Iniciando processo de postagem do tweet.")
+    logging.info(f"Navegando para a página inicial do X: {TWITTER_HOME_URL_FOR_TWEET_BUTTON}")
+    driver.get(TWITTER_HOME_URL_FOR_TWEET_BUTTON) # Acessa a home para ter o botão de postar de forma mais consistente.
+    wait = WebDriverWait(driver, 30) # Tempo de espera aumentado para a página inicial.
 
     try:
+        # XPath para o botão principal de "Postar" ou "Novo Tweet" na interface.
         post_button_xpath = "//a[@data-testid='SideNav_NewTweet_Button']"
-        logging.info(f"Procurando botão de postar com XPath: {post_button_xpath}")
+        logging.info(f"Procurando o botão principal de postar com XPath: {post_button_xpath}")
         post_button = wait.until(EC.element_to_be_clickable((By.XPATH, post_button_xpath)))
-        # Às vezes, um scroll é necessário se o botão não estiver visível
+        
+        # Garante que o botão esteja visível na tela antes de clicar.
         driver.execute_script("arguments[0].scrollIntoViewIfNeeded(true);", post_button)
-        time.sleep(0.5) # Pequena pausa após o scroll
+        time.sleep(0.5) # Pequena pausa após o scroll.
         post_button.click()
-        logging.info("Botão de 'Postar' clicado.")
-        time.sleep(1.5) # Aumentar pausa para a caixa de diálogo abrir
+        logging.info("Botão principal de 'Postar' clicado.")
+        time.sleep(1.5) # Pausa para a caixa de diálogo de composição do tweet abrir.
 
+        # XPath para a área de texto onde o tweet será digitado.
         tweet_textarea_xpath = "//div[@data-testid='tweetTextarea_0']"
-        logging.info(f"Procurando caixa de texto do tweet com XPath: {tweet_textarea_xpath}")
+        logging.info(f"Procurando a caixa de texto do tweet com XPath: {tweet_textarea_xpath}")
         tweet_textarea = wait.until(EC.visibility_of_element_located((By.XPATH, tweet_textarea_xpath)))
         
-        logging.info(f"Inserindo texto na caixa de tweet: '{tweet_content[:50]}...'")
-        tweet_textarea.send_keys(tweet_content)
-        time.sleep(1)
+        logging.info(f"Inserindo texto na caixa de tweet (primeiros 50 chars): '{tweet_content[:50]}...'")
+        tweet_textarea.send_keys(tweet_content) # Digita o conteúdo do tweet.
+        time.sleep(1) # Pausa após digitar.
 
+        # XPath para o botão final de "Postar" dentro da caixa de diálogo de composição.
         submit_tweet_button_xpath = "//button[@data-testid='tweetButton']"
-        logging.info(f"Procurando botão de submeter o tweet com XPath: {submit_tweet_button_xpath}")
+        logging.info(f"Procurando o botão de submissão do tweet com XPath: {submit_tweet_button_xpath}")
         submit_tweet_button = wait.until(EC.element_to_be_clickable((By.XPATH, submit_tweet_button_xpath)))
         
-        # Garantir que o botão está visível e clicável
         driver.execute_script("arguments[0].scrollIntoViewIfNeeded(true);", submit_tweet_button)
         time.sleep(0.5)
-        # Tentar clicar via JavaScript se o clique normal falhar por interceptação
+        
+        # Tenta o clique normal primeiro; se interceptado, tenta via JavaScript.
         try:
             submit_tweet_button.click()
         except ElementClickInterceptedException:
-            logging.warning("Clique normal interceptado, tentando clique via JavaScript.")
+            logging.warning("Clique normal no botão de submeter tweet foi interceptado. Tentando clique via JavaScript.")
             driver.execute_script("arguments[0].click();", submit_tweet_button)
 
-        logging.info("Tweet postado com sucesso!")
-        # Esperar por uma indicação de sucesso, como a caixa de diálogo desaparecer ou uma notificação
-        # Exemplo: esperar que o botão de postar da caixa de diálogo não esteja mais visível
+        logging.info("Botão de submissão do tweet clicado.")
+        # Espera a confirmação da postagem, verificando se o botão de submissão desapareceu.
         wait.until(EC.invisibility_of_element_located((By.XPATH, submit_tweet_button_xpath)))
-        logging.info("Caixa de diálogo de tweet fechada (indicando sucesso).")
+        logging.info("Tweet postado com sucesso! Caixa de diálogo de composição fechada.")
         return True
 
     except TimeoutException as e:
-        logging.error(f"Timeout ao tentar postar o tweet: {e}")
+        logging.error(f"Timeout durante o processo de postagem do tweet: {e}")
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_posting_tweet_timeout.png"))
-    except ElementClickInterceptedException as e:
-        logging.error(f"ElementClickInterceptedException ao postar: {e}")
+    except ElementClickInterceptedException as e: # Erro específico se o clique for bloqueado.
+        logging.error(f"ElementClickInterceptedException ao tentar postar o tweet: {e}")
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_posting_tweet_intercepted.png"))
-    except Exception as e:
-        logging.error(f"Erro inesperado ao postar tweet: {e}", exc_info=True)
+    except Exception as e: # Captura outras exceções.
+        logging.error(f"Erro inesperado ao tentar postar o tweet: {e}", exc_info=True)
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_posting_tweet_generic.png"))
     return False
 
 
 def twitter_bot_task():
-    logging.info("--- Iniciando tarefa do bot do Twitter ---")
-    driver = None
+    """
+    Executa um ciclo completo da tarefa do bot:
+    1. Inicializa o WebDriver.
+    2. Seleciona um trending topic.
+    3. Gera conteúdo de tweet para o topic.
+    4. Posta o tweet.
+    5. Fecha o WebDriver.
+    """
+    logging.info("--- Iniciando ciclo da tarefa do bot do Twitter ---")
+    driver = None # Inicializa driver como None para o bloco finally.
     try:
-        driver = init_driver(PROFILE_PATH)
+        # Usa a variável global PROFILE_PATH definida no topo do script.
+        driver = init_driver(PROFILE_PATH) 
         
-        trends = select_trends_from_twitter(driver)
+        trends = select_trends_from_twitter(driver) # Busca os trending topics.
 
-        if trends:
-            chosen_trend = random.choice(trends)
-            logging.info(f"Trend escolhida: '{chosen_trend}'")
+        if trends: # Se alguma trend for encontrada.
+            chosen_trend = random.choice(trends) # Escolhe uma aleatoriamente.
+            logging.info(f"Trend selecionada para este ciclo: '{chosen_trend}'")
             
-            tweet_text = get_tweet_content_from_gemini(chosen_trend)
+            tweet_text = get_tweet_content_from_gemini(chosen_trend) # Gera o tweet.
             
-            if tweet_text:
-                if post_tweet_on_twitter(driver, tweet_text):
-                    logging.info(f"Tarefa concluída com sucesso para a trend: '{chosen_trend}'")
+            if tweet_text: # Se o conteúdo do tweet for gerado com sucesso.
+                if post_tweet_on_twitter(driver, tweet_text): # Tenta postar.
+                    logging.info(f"Tarefa concluída com sucesso! Tweet postado para a trend: '{chosen_trend}'")
                 else:
-                    logging.warning("Falha ao postar o tweet.")
+                    logging.warning("Falha ao tentar postar o tweet neste ciclo.")
             else:
-                logging.warning("Não foi possível gerar conteúdo para o tweet.")
+                logging.warning("Não foi possível gerar conteúdo para o tweet com a API Gemini.")
         else:
-            logging.warning("Nenhuma trend foi selecionada.")
+            logging.warning("Nenhuma trend foi encontrada ou selecionada neste ciclo.")
 
-    except Exception as e:
-        logging.error(f"Erro na tarefa do bot do Twitter: {e}", exc_info=True)
-        if driver:
+    except Exception as e: # Captura exceções gerais durante a execução da tarefa.
+        logging.error(f"Erro geral durante a execução da tarefa do bot: {e}", exc_info=True)
+        if driver: # Tenta salvar um screenshot se o driver ainda existir.
             try:
                 driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_twitter_bot_task.png"))
-            except Exception: pass # Ignora erros ao salvar screenshot aqui
+            except Exception as e_ss: 
+                logging.error(f"Falha ao salvar screenshot do erro da tarefa: {e_ss}")
     finally:
+        # Garante que o WebDriver seja fechado, mesmo se ocorrerem erros.
         if driver:
-            logging.info("Fechando o WebDriver da tarefa atual.")
+            logging.info("Fechando o WebDriver ao final da tarefa.")
             driver.quit()
-        logging.info("--- Tarefa do bot do Twitter finalizada ---")
+        logging.info("--- Ciclo da tarefa do bot do Twitter finalizado ---")
 
 
-# --- AGENDAMENTO ---
-logging.info(f"Agendando a tarefa para rodar a cada {SCHEDULE_INTERVAL_MINUTES} minutos.")
-# Para teste inicial, você pode querer rodar uma vez imediatamente:
-#twitter_bot_task() 
-
+# --- AGENDAMENTO DA TAREFA ---
+# Configura a tarefa `twitter_bot_task` para ser executada no intervalo definido.
+logging.info(f"Agendando a tarefa do bot para executar a cada {SCHEDULE_INTERVAL_MINUTES} minutos.")
 schedule.every(SCHEDULE_INTERVAL_MINUTES).minutes.do(twitter_bot_task)
 
-# Para testar apenas uma vez sem o loop de agendamento:
-#if __name__ == "__main__":
-#    twitter_bot_task() # Executa a tarefa uma vez para teste
-
-#Para rodar continuamente com agendamento:
+# Bloco principal que mantém o script rodando para o agendador funcionar.
 if __name__ == "__main__":
-    logging.info("Iniciando loop de agendamento. Pressione Ctrl+C para sair.")
-    # Roda uma vez imediatamente ao iniciar
-    schedule.run_all(delay_seconds=1) 
+    logging.info("Iniciando loop de agendamento do bot. Pressione Ctrl+C para sair.")
+    
+    # Executa todas as tarefas agendadas uma vez imediatamente ao iniciar.
+    # Útil para verificar se a tarefa funciona sem esperar o primeiro intervalo.
+    try:
+        logging.info("Executando a tarefa uma vez imediatamente...")
+        twitter_bot_task() # Executa a tarefa diretamente uma vez.
+        # Ou: schedule.run_all(delay_seconds=1) # Se houvesse múltiplas tarefas agendadas.
+    except Exception as e:
+        logging.error(f"Erro durante a primeira execução imediata da tarefa: {e}", exc_info=True)
+
+    logging.info(f"Próxima execução agendada: {schedule.next_run() if schedule.jobs else 'Nenhuma tarefa agendada.'}")
+    
+    # Loop infinito que verifica e executa tarefas pendentes.
     while True:
         try:
-            schedule.run_pending()
-            time.sleep(1)
-        except KeyboardInterrupt:
-            logging.info("Loop de agendamento interrompido pelo usuário.")
+            schedule.run_pending() # Verifica e executa tarefas agendadas.
+            time.sleep(1)          # Pausa por 1 segundo para não sobrecarregar a CPU.
+        except KeyboardInterrupt:  # Permite encerrar o bot com Ctrl+C.
+            logging.info("Loop de agendamento interrompido pelo usuário (Ctrl+C). Encerrando...")
             break
-        except Exception as e:
-            logging.error(f"Erro no loop de agendamento: {e}", exc_info=True)
-            time.sleep(60) # Espera um minuto antes de tentar novamente em caso de erro grave
+        except Exception as e:     # Captura outros erros inesperados no loop de agendamento.
+            logging.error(f"Erro crítico no loop de agendamento principal: {e}", exc_info=True)
+            logging.info("Aguardando 60 segundos antes de tentar continuar o loop de agendamento...")
+            time.sleep(60)         # Pausa antes de tentar continuar em caso de erro grave no loop.
