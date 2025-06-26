@@ -62,20 +62,81 @@ if not PROFILE_PATH or not os.path.isdir(PROFILE_PATH):
 # --- SUA LÓGICA DE BOT (INTACTA E FUNCIONAL) ---
 class BotStats:
     def __init__(self):
-        self.total_tweets, self.successful_tweets, self.failed_tweets = 0, 0, 0
-        self.start_time, self.last_tweet_time = None, None
+        self.total_tweets = 0
+        self.successful_tweets = 0
+        self.failed_tweets = 0
+        self.start_time = None
+        self.last_tweet_time = None
         self.trends_used = []
+    
     def add_tweet_attempt(self, success=True, trend_used=None):
+        """
+        Adiciona uma tentativa de tweet às estatísticas.
+        """
         self.total_tweets += 1
-        if success: self.successful_tweets += 1; self.last_tweet_time = datetime.now()
-        else: self.failed_tweets += 1
-        if trend_used: self.trends_used.append({'trend': trend_used, 'timestamp': datetime.now(), 'success': success})
+        
+        if success:
+            self.successful_tweets += 1
+            self.last_tweet_time = datetime.now()
+            logger.info(f"Sucesso registrado. Total sucessos: {self.successful_tweets}")
+        else:
+            self.failed_tweets += 1
+            logger.info(f"Falha registrada. Total falhas: {self.failed_tweets}")
+        
+        if trend_used:
+            entry = {
+                'trend': trend_used,
+                'timestamp': datetime.now(),
+                'success': success
+            }
+            self.trends_used.append(entry)
+            logger.debug(f"Trend registrada: {trend_used} - {'Sucesso' if success else 'Falha'}")
+    
     def get_success_rate(self):
-        return (self.successful_tweets / self.total_tweets * 100) if self.total_tweets else 0
+        """
+        Calcula e retorna a taxa de sucesso.
+        """
+        if self.total_tweets == 0:
+            return 0.0
+        
+        rate = (self.successful_tweets / self.total_tweets) * 100
+        return rate
+    
     def export_to_csv(self, filename):
-        with open(filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f); writer.writerow(['Trend', 'Timestamp', 'Success'])
-            for entry in self.trends_used: writer.writerow([entry['trend'], entry['timestamp'].strftime('%d/%m/%Y %H:%M:%S'), entry['success']])
+        """
+        Exporta as estatísticas para um arquivo CSV.
+        """
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Trend', 'Timestamp', 'Success'])
+                
+                for entry in self.trends_used:
+                    writer.writerow([
+                        entry['trend'],
+                        entry['timestamp'].strftime('%d/%m/%Y %H:%M:%S'),
+                        entry['success']
+                    ])
+            
+            logger.info(f"Estatísticas exportadas para: {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao exportar estatísticas: {e}")
+            return False
+    
+    def get_summary(self):
+        """
+        Retorna um resumo das estatísticas.
+        """
+        return {
+            'total_tweets': self.total_tweets,
+            'successful_tweets': self.successful_tweets,
+            'failed_tweets': self.failed_tweets,
+            'success_rate': self.get_success_rate(),
+            'uptime': str(datetime.now() - self.start_time).split('.')[0] if self.start_time else "N/A",
+            'last_tweet_time': self.last_tweet_time.strftime('%H:%M:%S') if self.last_tweet_time else "N/A"
+        }
 
 def init_driver(profile_path_arg):
     options = Options()
@@ -89,58 +150,427 @@ def init_driver(profile_path_arg):
         logger.error(f"Falha ao inicializar o WebDriver: {e}", exc_info=True); raise
 
 def get_tweet_content_from_gemini(trend_topic, custom_prompt=None):
+    """
+    Versão melhorada da função para obter conteúdo da IA Gemini.
+    """
+    logger.info(f"Solicitando conteúdo da IA Gemini para trend: '{trend_topic}'")
+    
     headers = {"Content-Type": "application/json"}
-    prompt = custom_prompt.replace("{trend}", trend_topic) if custom_prompt else (f"'{trend_topic}' está em alta. Crie um tweet curto e engajador (máx de {MAX_TWEET_CHARACTERS - 45} caracteres) com uma curiosidade sobre o tema. Inclua 1 hashtag relevante. Tom informativo. Não use datas, saudações, links ou []. Responda APENAS com o texto do tweet.")
-    data_payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.5}}
+    
+    # Usa prompt personalizado se fornecido, senão usa o padrão
+    if custom_prompt and custom_prompt.strip():
+        prompt = custom_prompt.replace("{trend}", trend_topic)
+        logger.info("Usando prompt personalizado")
+    else:
+        prompt = (f"'{trend_topic}' está em alta. Crie um tweet curto e engajador "
+                 f"(máximo de {MAX_TWEET_CHARACTERS - 45} caracteres) com uma curiosidade "
+                 f"sobre o tema. Inclua 1 hashtag relevante. Tom informativo. "
+                 f"Não use datas, saudações, links ou []. Responda APENAS com o texto do tweet.")
+        logger.info("Usando prompt padrão")
+    
+    data_payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.5,
+            "maxOutputTokens": 100,
+            "topP": 0.8,
+            "topK": 10
+        }
+    }
+    
     try:
-        response = requests.post(GEMINI_API_URL, headers=headers, json=data_payload, timeout=45)
-        response.raise_for_status(); data = response.json()
-        if data.get("candidates", [{}])[0].get("content", {}).get("parts"):
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e: logger.error(f"Erro na API Gemini: {e}"); return None
+        logger.info("Enviando requisição para API Gemini...")
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            json=data_payload,
+            timeout=45
+        )
+        
+        logger.info(f"Status da resposta: {response.status_code}")
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        # Verifica se a resposta tem o formato esperado
+        if not data.get("candidates"):
+            logger.error("Resposta da API sem candidates")
+            return None
+            
+        candidate = data["candidates"][0]
+        if not candidate.get("content", {}).get("parts"):
+            logger.error("Resposta da API sem content/parts")
+            return None
+        
+        generated_text = candidate["content"]["parts"][0]["text"].strip()
+        
+        if not generated_text:
+            logger.error("Texto gerado está vazio")
+            return None
+        
+        logger.info(f"✓ Conteúdo gerado com sucesso: '{generated_text[:50]}...'")
+        return generated_text
+        
+    except requests.exceptions.Timeout:
+        logger.error("Timeout na requisição para API Gemini")
+        return None
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Erro HTTP na API Gemini: {e}")
+        try:
+            error_data = response.json()
+            logger.error(f"Detalhes do erro: {error_data}")
+        except:
+            pass
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro de rede na API Gemini: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Erro inesperado na API Gemini: {e}", exc_info=True)
+        return None
 
 def select_trends_from_twitter(driver):
+    """
+    Seleciona trends do Twitter com melhor tratamento de erros e múltiplos seletores.
+    """
     logger.info(f"Acessando a página de trends: {TWITTER_TRENDS_URL}")
-    driver.get(TWITTER_TRENDS_URL)
-    trends = []
+    
     try:
-        wait = WebDriverWait(driver, 20)
-        # Seletor mais robusto para a div que contém as trends
-        trends_container = wait.until(EC.visibility_of_element_located((By.XPATH, '//section[@aria-labelledby]')))
-        # Seletor para os spans dentro das trends
-        elements = trends_container.find_elements(By.XPATH, ".//div[@data-testid='trend']//span")
+        # Navega para a página de trends
+        driver.get(TWITTER_TRENDS_URL)
         
-        # Filtro para pegar apenas os nomes das trends (ex: #Python), ignorando "Trending in..." e "1,234 posts"
-        trends = list(dict.fromkeys([
-            e.text.strip() for e in elements 
-            if e.text.strip() and e.text.strip().startswith('#')
-        ]))
+        # Aguarda a página carregar
+        wait = WebDriverWait(driver, 30)
+        
+        # Aguarda um elemento que indica que a página carregou
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        
+        # Aguarda mais um pouco para garantir que o conteúdo dinâmico carregou
+        time.sleep(5)
+        
+        logger.info("Página de trends carregada, procurando por trends...")
+        
+        trends = []
+        
+        # Múltiplas estratégias para encontrar trends
+        strategies = [
+            # Estratégia 1: Usando data-testid
+            {
+                'name': 'data-testid',
+                'container': "//section[@aria-labelledby]",
+                'elements': ".//div[@data-testid='trend']//span"
+            },
+            # Estratégia 2: Procurando por texto que começa com #
+            {
+                'name': 'hashtag_spans',
+                'container': "//main",
+                'elements': ".//span[starts-with(text(), '#')]"
+            },
+            # Estratégia 3: Procurando em divs de trend
+            {
+                'name': 'trend_divs',
+                'container': "//div[contains(@aria-label, 'Timeline')]",
+                'elements': ".//div[contains(@class, 'trend') or contains(@data-testid, 'trend')]//span"
+            },
+            # Estratégia 4: Procura mais ampla por spans com #
+            {
+                'name': 'all_hashtags',
+                'container': "//body",
+                'elements': ".//span[contains(text(), '#')]"
+            }
+        ]
+        
+        for strategy in strategies:
+            try:
+                logger.info(f"Tentando estratégia: {strategy['name']}")
+                
+                # Tenta encontrar o container
+                container = None
+                try:
+                    container = wait.until(EC.presence_of_element_located((By.XPATH, strategy['container'])))
+                    logger.info(f"Container encontrado para estratégia {strategy['name']}")
+                except TimeoutException:
+                    logger.warning(f"Container não encontrado para estratégia {strategy['name']}")
+                    continue
+                
+                # Procura pelos elementos dentro do container
+                elements = container.find_elements(By.XPATH, strategy['elements'])
+                logger.info(f"Encontrados {len(elements)} elementos na estratégia {strategy['name']}")
+                
+                # Extrai o texto dos elementos
+                strategy_trends = []
+                for element in elements:
+                    try:
+                        text = element.text.strip()
+                        if text and text.startswith('#') and len(text) > 1:
+                            # Remove caracteres especiais e espaços extras
+                            clean_text = text.split()[0]  # Pega apenas a primeira palavra
+                            if len(clean_text) > 1 and clean_text not in strategy_trends:
+                                strategy_trends.append(clean_text)
+                    except Exception as e:
+                        continue
+                
+                if strategy_trends:
+                    logger.info(f"Estratégia {strategy['name']} encontrou {len(strategy_trends)} trends")
+                    trends.extend(strategy_trends)
+                    break  # Se encontrou trends, para aqui
+                    
+            except Exception as e:
+                logger.warning(f"Erro na estratégia {strategy['name']}: {e}")
+                continue
+        
+        # Remove duplicatas mantendo a ordem
+        unique_trends = []
+        seen = set()
+        for trend in trends:
+            if trend not in seen:
+                unique_trends.append(trend)
+                seen.add(trend)
+        
+        trends = unique_trends[:20]  # Limita a 20 trends
         
         if trends:
-            logger.info(f"Trends encontradas: {len(trends)} -> {trends[:5]}")
-        else:
-            logger.warning("Nenhuma trend com '#' foi encontrada na página.")
-            driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "no_trends_found.png"))
+            logger.info(f"Trends encontradas ({len(trends)}): {trends[:10]}...")  # Mostra apenas as 10 primeiras no log
             
+            # Salva screenshot de sucesso
+            success_screenshot = os.path.join(SCREENSHOT_DIR, f"trends_success_{int(time.time())}.png")
+            driver.save_screenshot(success_screenshot)
+            
+        else:
+            logger.warning("Nenhuma trend foi encontrada com nenhuma das estratégias")
+            
+            # Tira screenshot para debug
+            error_screenshot = os.path.join(SCREENSHOT_DIR, f"no_trends_{int(time.time())}.png")
+            driver.save_screenshot(error_screenshot)
+            
+            # Tenta logar o HTML da página para debug
+            try:
+                page_source_snippet = driver.page_source[:2000]  # Primeiros 2000 caracteres
+                logger.debug(f"Snippet do HTML da página: {page_source_snippet}")
+            except:
+                pass
+                
+        return trends
+        
     except Exception as e:
-        logger.error(f"Erro ao selecionar trends: {e}", exc_info=True)
-        driver.save_screenshot(os.path.join(SCREENSHOT_DIR, "error_selecting_trends.png"))
-    return trends
+        logger.error(f"Erro geral ao selecionar trends: {e}", exc_info=True)
+        
+        # Tira screenshot do erro
+        error_screenshot = os.path.join(SCREENSHOT_DIR, f"trends_error_{int(time.time())}.png")
+        try:
+            driver.save_screenshot(error_screenshot)
+            logger.error(f"Screenshot do erro salvo em: {error_screenshot}")
+        except:
+            pass
+        
+        return []
+
+
+def get_backup_trends():
+    """
+    Retorna uma lista de trends de backup caso não consiga obter do Twitter.
+    """
+    backup_trends = [
+        "#Python", "#JavaScript", "#TechNews", "#AI", "#MachineLearning",
+        "#WebDev", "#Programming", "#OpenSource", "#DataScience", "#CloudComputing",
+        "#Cybersecurity", "#Innovation", "#DigitalTransformation", "#SoftwareDevelopment",
+        "#TechTrends", "#Automation", "#BigData", "#IoT", "#Blockchain", "#DevOps"
+    ]
+    return backup_trends
 
 def post_tweet_on_twitter(driver, tweet_content):
-    driver.get(TWITTER_HOME_URL_FOR_TWEET_BUTTON)
+    """
+    Posta um tweet no Twitter com melhor tratamento de erros e diagnóstico.
+    """
+    logger.info(f"Tentando postar tweet: '{tweet_content[:50]}...'")
+    
     try:
+        # Navega para a página inicial do Twitter
+        driver.get(TWITTER_HOME_URL_FOR_TWEET_BUTTON)
+        logger.info("Navegou para página inicial do Twitter")
+        
+        # Aguarda a página carregar completamente
         wait = WebDriverWait(driver, 30)
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@data-testid='SideNav_NewTweet_Button']"))).click()
-        tweet_area = wait.until(EC.visibility_of_element_located((By.XPATH, "//div[@data-testid='tweetTextarea_0']")))
+        
+        # Tenta encontrar e clicar no botão de novo tweet
+        logger.info("Procurando botão de novo tweet...")
+        
+        # Múltiplos seletores possíveis para o botão de tweet
+        tweet_button_selectors = [
+            "//a[@data-testid='SideNav_NewTweet_Button']",
+            "//button[@data-testid='SideNav_NewTweet_Button']",
+            "//a[contains(@href, '/compose/tweet')]",
+            "//button[contains(text(), 'Tweet')]",
+            "//a[@aria-label='Tweet']"
+        ]
+        
+        tweet_button = None
+        for selector in tweet_button_selectors:
+            try:
+                tweet_button = wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+                logger.info(f"Botão de tweet encontrado com seletor: {selector}")
+                break
+            except TimeoutException:
+                continue
+        
+        if not tweet_button:
+            raise Exception("Não foi possível encontrar o botão de novo tweet")
+        
+        # Clica no botão de tweet
+        try:
+            tweet_button.click()
+            logger.info("Clicou no botão de novo tweet")
+        except ElementClickInterceptedException:
+            logger.warning("Clique interceptado, tentando com JavaScript")
+            driver.execute_script("arguments[0].click();", tweet_button)
+        
+        # Aguarda a área de texto aparecer
+        logger.info("Procurando área de texto do tweet...")
+        
+        # Múltiplos seletores para a área de texto
+        textarea_selectors = [
+            "//div[@data-testid='tweetTextarea_0']",
+            "//div[@role='textbox']",
+            "//div[@contenteditable='true']",
+            "//div[contains(@class, 'public-DraftEditor-content')]"
+        ]
+        
+        tweet_area = None
+        for selector in textarea_selectors:
+            try:
+                tweet_area = wait.until(EC.visibility_of_element_located((By.XPATH, selector)))
+                logger.info(f"Área de texto encontrada com seletor: {selector}")
+                break
+            except TimeoutException:
+                continue
+        
+        if not tweet_area:
+            # Tira screenshot para debug
+            screenshot_path = os.path.join(SCREENSHOT_DIR, f"no_textarea_{int(time.time())}.png")
+            driver.save_screenshot(screenshot_path)
+            raise Exception(f"Não foi possível encontrar a área de texto. Screenshot salvo em: {screenshot_path}")
+        
+        # Limpa qualquer texto existente e insere o novo conteúdo
+        tweet_area.clear()
         tweet_area.send_keys(tweet_content)
-        submit_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='tweetButton']")))
-        try: submit_button.click()
-        except ElementClickInterceptedException: driver.execute_script("arguments[0].click();", submit_button)
-        wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[contains(@data-testid,'tweetTextarea_0')]")))
+        logger.info("Texto inserido na área de tweet")
+        
+        # Aguarda um pouco para garantir que o texto foi inserido
+        time.sleep(2)
+        
+        # Verifica se o texto foi realmente inserido
+        inserted_text = tweet_area.text or tweet_area.get_attribute('value') or ''
+        if not inserted_text.strip():
+            raise Exception("O texto do tweet não foi inserido corretamente")
+        
+        logger.info(f"Texto verificado na área: '{inserted_text[:50]}...'")
+        
+        # Procura pelo botão de publicar
+        logger.info("Procurandoботão de publicar...")
+        
+        # Múltiplos seletores para o botão de publicar
+        submit_selectors = [
+            "//button[@data-testid='tweetButton']",
+            "//button[@data-testid='tweetButtonInline']",
+            "//button[contains(text(), 'Tweet')]",
+            "//button[contains(text(), 'Postar')]",
+            "//button[@role='button'][contains(., 'Tweet')]"
+        ]
+        
+        submit_button = None
+        for selector in submit_selectors:
+            try:
+                submit_button = wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+                logger.info(f"Botão de publicar encontrado com seletor: {selector}")
+                break
+            except TimeoutException:
+                continue
+        
+        if not submit_button:
+            # Tira screenshot para debug
+            screenshot_path = os.path.join(SCREENSHOT_DIR, f"no_submit_button_{int(time.time())}.png")
+            driver.save_screenshot(screenshot_path)
+            raise Exception(f"Não foi possível encontrar o botão de publicar. Screenshot salvo em: {screenshot_path}")
+        
+        # Verifica se o botão está habilitado
+        if not submit_button.is_enabled():
+            raise Exception("O botão de publicar está desabilitado")
+        
+        # Clica no botão de publicar
+        try:
+            submit_button.click()
+            logger.info("Clicou no botão de publicar")
+        except ElementClickInterceptedException:
+            logger.warning("Clique no botão de publicar interceptado, tentando com JavaScript")
+            driver.execute_script("arguments[0].click();", submit_button)
+        
+        # Aguarda a confirmação de que o tweet foi enviado
+        logger.info("Aguardando confirmação do envio...")
+        
+        # Verifica se o modal de composição foi fechado (indicando sucesso)
+        try:
+            wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[@data-testid='tweetTextarea_0']")))
+            logger.info("Modal de composição fechado - tweet enviado com sucesso")
+        except TimeoutException:
+            # Se o modal não fechou, pode ter havido um erro
+            logger.warning("Modal de composição não fechou - verificando possíveis erros")
+            
+            # Procura por mensagens de erro
+            error_selectors = [
+                "//div[@role='alert']",
+                "//div[contains(@class, 'error')]",
+                "//div[contains(text(), 'erro')]",
+                "//div[contains(text(), 'Error')]"
+            ]
+            
+            for selector in error_selectors:
+                try:
+                    error_element = driver.find_element(By.XPATH, selector)
+                    error_text = error_element.text
+                    if error_text:
+                        raise Exception(f"Erro detectado na interface: {error_text}")
+                except:
+                    continue
+        
+        # Aguarda mais um pouco para garantir que o tweet foi processado
+        time.sleep(3)
+        
+        # Tira screenshot de sucesso
+        success_screenshot = os.path.join(SCREENSHOT_DIR, f"tweet_success_{int(time.time())}.png")
+        driver.save_screenshot(success_screenshot)
+        
+        logger.info(f"Tweet postado com sucesso! Screenshot salvo em: {success_screenshot}")
         return True
+        
+    except TimeoutException as e:
+        error_msg = f"Timeout ao postar tweet: {str(e)}"
+        logger.error(error_msg)
+        
+        # Tira screenshot do erro
+        error_screenshot = os.path.join(SCREENSHOT_DIR, f"timeout_error_{int(time.time())}.png")
+        driver.save_screenshot(error_screenshot)
+        logger.error(f"Screenshot do erro salvo em: {error_screenshot}")
+        
+        return False
+        
     except Exception as e:
-        logger.error(f"Erro ao postar tweet: {e}"); return False
+        error_msg = f"Erro ao postar tweet: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # Tira screenshot do erro
+        error_screenshot = os.path.join(SCREENSHOT_DIR, f"post_error_{int(time.time())}.png")
+        driver.save_screenshot(error_screenshot)
+        logger.error(f"Screenshot do erro salvo em: {error_screenshot}")
+        
+        # Tenta obter informações adicionais sobre o estado da página
+        try:
+            current_url = driver.current_url
+            page_title = driver.title
+            logger.error(f"Estado da página - URL: {current_url}, Título: {page_title}")
+        except:
+            pass
+        
+        return False
 
 # --- ESTRUTURA DE CONTROLE DA GUI E AGENDADOR (CORRIGIDA) ---
 bot_is_running_event = threading.Event()
@@ -175,25 +605,108 @@ def save_config(config):
     with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
 
 def twitter_bot_task_thread_safe():
+    """
+    Função principal do bot com melhor tratamento de erros e logging detalhado.
+    """
     global bot_stats
-    # Não precisa mais do 'manual_run' flag, a lógica do agendador cuida disso
-    logger.info("--- Iniciando ciclo do bot ---")
-    driver, chosen_trend, success = None, None, False
+    
+    logger.info("=" * 50)
+    logger.info("INICIANDO NOVO CICLO DO BOT")
+    logger.info("=" * 50)
+    
+    driver = None
+    chosen_trend = None
+    success = False
+    error_details = None
+    
     try:
-        driver = init_driver(PROFILE_PATH) 
+        # Etapa 1: Inicialização do driver
+        logger.info("Etapa 1/5: Inicializando o WebDriver...")
+        driver = init_driver(PROFILE_PATH)
+        logger.info("✓ WebDriver inicializado com sucesso")
+        
+        # Etapa 2: Seleção de trends
+        logger.info("Etapa 2/5: Obtendo trends do Twitter...")
         trends = select_trends_from_twitter(driver)
-        if trends:
-            chosen_trend = random.choice(trends)
-            logger.info(f"Trend selecionada: '{chosen_trend}'")
-            tweet_text = get_tweet_content_from_gemini(chosen_trend, load_config().get('custom_prompt', ''))
-            if tweet_text: success = post_tweet_on_twitter(driver, tweet_text)
-        else: logger.warning("Nenhuma trend foi encontrada.")
-    except Exception as e: logger.error(f"Erro geral na tarefa: {e}", exc_info=True)
+        
+        if not trends:
+            logger.warning("Nenhuma trend obtida do Twitter, usando trends de backup...")
+            trends = get_backup_trends()
+            logger.info(f"Usando {len(trends)} trends de backup")
+        
+        if not trends:
+            raise Exception("Não foi possível obter nenhuma trend (nem do Twitter nem de backup)")
+        
+        # Seleciona uma trend aleatória
+        chosen_trend = random.choice(trends)
+        logger.info(f"✓ Trend selecionada: '{chosen_trend}' (de {len(trends)} disponíveis)")
+        
+        # Etapa 3: Geração de conteúdo
+        logger.info("Etapa 3/5: Gerando conteúdo com IA Gemini...")
+        custom_prompt = load_config().get('custom_prompt', '')
+        tweet_text = get_tweet_content_from_gemini(chosen_trend, custom_prompt)
+        
+        if not tweet_text:
+            raise Exception("Falha ao gerar conteúdo com a IA Gemini")
+        
+        # Valida o tamanho do tweet
+        if len(tweet_text) > MAX_TWEET_CHARACTERS:
+            logger.warning(f"Tweet muito longo ({len(tweet_text)} chars), truncando...")
+            tweet_text = tweet_text[:MAX_TWEET_CHARACTERS-3] + "..."
+        
+        logger.info(f"✓ Conteúdo gerado ({len(tweet_text)} chars): '{tweet_text[:100]}...'")
+        
+        # Etapa 4: Postagem do tweet
+        logger.info("Etapa 4/5: Postando tweet no Twitter...")
+        success = post_tweet_on_twitter(driver, tweet_text)
+        
+        if success:
+            logger.info("✓ Tweet postado com sucesso!")
+        else:
+            error_details = "Falha na postagem do tweet"
+            logger.error(f"✗ {error_details}")
+        
+        # Etapa 5: Finalização
+        logger.info("Etapa 5/5: Finalizando ciclo...")
+        
+    except Exception as e:
+        error_details = str(e)
+        logger.error(f"✗ Erro geral na tarefa: {error_details}", exc_info=True)
+        
+        # Tenta obter informações adicionais do driver se ainda estiver ativo
+        if driver:
+            try:
+                current_url = driver.current_url
+                logger.error(f"URL atual quando ocorreu o erro: {current_url}")
+            except:
+                pass
+    
     finally:
+        # Sempre registra a tentativa nas estatísticas
         bot_stats.add_tweet_attempt(success, chosen_trend)
-        app_tk.after(0, update_stats_display); app_tk.after(0, update_history_tree)
-        if driver: driver.quit()
-        logger.info("--- Ciclo do bot finalizado ---")
+        
+        # Atualiza a interface
+        try:
+            app_tk.after(0, update_stats_display)
+            app_tk.after(0, update_history_tree)
+        except:
+            pass
+        
+        # Fecha o driver
+        if driver:
+            try:
+                driver.quit()
+                logger.info("✓ WebDriver fechado")
+            except Exception as e:
+                logger.warning(f"Erro ao fechar WebDriver: {e}")
+        
+        # Log de finalização
+        logger.info("=" * 50)
+        if success:
+            logger.info(f"CICLO CONCLUÍDO COM SUCESSO - Trend: {chosen_trend}")
+        else:
+            logger.error(f"CICLO FALHOU - Trend: {chosen_trend}, Erro: {error_details}")
+        logger.info("=" * 50)
 
 def lancar_e_reagendar_tarefa():
     """Lança a tarefa em uma thread e recalcula o próximo horário de execução."""
@@ -338,12 +851,105 @@ def update_next_run_display():
     app_tk.after(1000, update_next_run_display)
 
 def update_stats_display():
-    if not bot_stats.start_time: return
-    uptime = str(datetime.now() - bot_stats.start_time).split('.')[0]; rate = bot_stats.get_success_rate()
-    stats_text = (f"Tempo Ativo: {uptime}\nTotal: {bot_stats.total_tweets} | Sucesso: {bot_stats.successful_tweets} | Falhas: {bot_stats.failed_tweets}\nTaxa de Sucesso: {rate:.1f}%")
-    if bot_stats.last_tweet_time: stats_text += f"\nÚltimo Tweet: {bot_stats.last_tweet_time.strftime('%H:%M:%S')}"
-    stats_text_widget.config(state='normal'); stats_text_widget.delete(1.0, tk.END); stats_text_widget.insert(1.0, stats_text); stats_text_widget.config(state='disabled')
-    success_progress['value'] = rate; success_label.config(text=f"{rate:.1f}% ({bot_stats.successful_tweets}/{bot_stats.total_tweets})")
+    """
+    Atualiza o display das estatísticas com correção na barra de progresso.
+    """
+    if not bot_stats.start_time:
+        return
+    
+    # Calcula o tempo ativo
+    uptime = str(datetime.now() - bot_stats.start_time).split('.')[0]
+    
+    # Calcula a taxa de sucesso
+    rate = bot_stats.get_success_rate()
+    
+    # Monta o texto das estatísticas
+    stats_text = (
+        f"Tempo Ativo: {uptime}\n"
+        f"Total: {bot_stats.total_tweets} | "
+        f"Sucesso: {bot_stats.successful_tweets} | "
+        f"Falhas: {bot_stats.failed_tweets}\n"
+        f"Taxa de Sucesso: {rate:.1f}%"
+    )
+    
+    if bot_stats.last_tweet_time:
+        stats_text += f"\nÚltimo Tweet: {bot_stats.last_tweet_time.strftime('%H:%M:%S')}"
+    
+    # Atualiza o widget de texto das estatísticas
+    try:
+        stats_text_widget.config(state='normal')
+        stats_text_widget.delete(1.0, tk.END)
+        stats_text_widget.insert(1.0, stats_text)
+        stats_text_widget.config(state='disabled')
+    except Exception as e:
+        logger.error(f"Erro ao atualizar texto das estatísticas: {e}")
+    
+    # Atualiza a barra de progresso
+    try:
+        # Define o valor da barra de progresso (0-100)
+        success_progress['value'] = rate
+        
+        # Força a atualização visual da barra
+        success_progress.update()
+        
+        # Atualiza o label da taxa de sucesso
+        success_label.config(text=f"{rate:.1f}% ({bot_stats.successful_tweets}/{bot_stats.total_tweets})")
+        
+        # Log para debug
+        logger.debug(f"Estatísticas atualizadas - Taxa: {rate:.1f}%, Total: {bot_stats.total_tweets}, Sucessos: {bot_stats.successful_tweets}")
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar barra de progresso: {e}")
+
+
+def update_history_tree():
+    """
+    Atualiza a árvore do histórico com melhor tratamento de erros.
+    """
+    try:
+        # Limpa os itens existentes
+        for item in history_tree.get_children():
+            history_tree.delete(item)
+        
+        # Adiciona os novos itens (últimos 50, em ordem reversa)
+        for info in reversed(bot_stats.trends_used[-50:]):
+            try:
+                tags = ('success',) if info['success'] else ('fail',)
+                status_symbol = "✓" if info['success'] else "✗"
+                
+                history_tree.insert('', 'end', values=(
+                    info['trend'],
+                    info['timestamp'].strftime('%H:%M:%S'),
+                    status_symbol
+                ), tags=tags)
+            except Exception as e:
+                logger.error(f"Erro ao inserir item no histórico: {e}")
+                
+    except Exception as e:
+        logger.error(f"Erro ao atualizar árvore do histórico: {e}")
+
+
+# Função auxiliar para testar as estatísticas
+def test_stats_update():
+    """
+    Função para testar se as estatísticas estão sendo atualizadas corretamente.
+    """
+    logger.info("Testando atualização das estatísticas...")
+    
+    # Simula algumas estatísticas para teste
+    if not bot_stats.start_time:
+        bot_stats.start_time = datetime.now() - timedelta(minutes=10)
+    
+    # Adiciona algumas tentativas de teste
+    bot_stats.add_tweet_attempt(True, "#TesteTrend1")
+    bot_stats.add_tweet_attempt(True, "#TesteTrend2")
+    bot_stats.add_tweet_attempt(False, "#TesteTrend3")
+    
+    # Atualiza os displays
+    update_stats_display()
+    update_history_tree()
+    
+    logger.info(f"Teste concluído - Taxa atual: {bot_stats.get_success_rate():.1f}%")
 
 def update_history_tree():
     for item in history_tree.get_children(): history_tree.delete(item)
@@ -392,7 +998,7 @@ interval_frame = ttk.Frame(control_frame); interval_frame.pack(fill="x", pady=5)
 ttk.Label(interval_frame, text="Intervalo (min):").pack(side=tk.LEFT, padx=5)
 interval_var = tk.StringVar(); interval_entry = ttk.Entry(interval_frame, textvariable=interval_var, width=10)
 interval_entry.pack(side=tk.LEFT)
-interval_entry.bind('<FocusOut>', lambda e: apply_interval_change()); interval_entry.bind('<Return>', lambda e: apply_interval_change())
+lambda e: apply_interval_change()
 ttk.Button(interval_frame, text="Aplicar", command=apply_interval_change).pack(side=tk.LEFT, padx=5)
 status_frame = ttk.LabelFrame(main_tab, text="Status", padding=(15, 10)); status_frame.pack(padx=10, pady=5, fill="x")
 status_label = ttk.Label(status_frame, text="Status: Parado", foreground="red", font=("Arial", 10, "bold")); status_label.pack(side=tk.LEFT, padx=5)
